@@ -10,6 +10,7 @@ This repo is a full starter framework for the strategy you asked for:
 - Risk controls + cooldown + stop
 - Backtest engine and a live-trader skeleton
 - Zerodha adapter (paper mode by default)
+- Simple live analysis monitor with alerts (no execution required)
 
 ## Important Scope Notes
 
@@ -40,6 +41,28 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+## Fastest Path: Live Analysis Monitor (No Execution)
+
+Use this if you only want analysis + alerts.
+
+1. Set your data source in:
+- `/Users/aadithyasumod/Documents/Playground/monitor_config.json`
+
+2. Run one analysis cycle:
+
+```bash
+python -m pairs_trading.simple_monitor --config /Users/aadithyasumod/Documents/Playground/monitor_config.json
+```
+
+3. Optional: run continuously every N minutes:
+- Set `"loop_minutes": 5` (or any number) in config.
+
+What you get:
+- Strategy health score (0 to 1)
+- Top current pair opportunities
+- Alert ping when opportunity is significant
+- Optional webhook alert via `PAIRS_ALERT_WEBHOOK_URL` or `webhook_url` in config
 
 ## A) Baseline Run (Synthetic Daily Data)
 

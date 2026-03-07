@@ -1,0 +1,27 @@
+{
+  "csv": "/Users/aadithyasumod/Documents/Playground/daily_prices_nse_universe.csv",
+  "symbols_file": null,
+  "symbol_column": "Symbol",
+  "start": "2020-01-01",
+  "end": null,
+  "chunk_size": 100,
+  "sleep_seconds": 0.5,
+
+  "min_history": 252,
+  "min_corr": 0.65,
+  "top_neighbors": 20,
+  "max_candidates": 40000,
+  "coint_p_threshold": 0.05,
+  "top_print": 15,
+
+  "alert_zscore": 2.0,
+  "alert_confidence": 1.0,
+  "health_min_for_alert": 0.4,
+
+  "loop_minutes": 0,
+  "bell_alert": true,
+  "webhook_url": null,
+
+  "out_csv": "/Users/aadithyasumod/Documents/Playground/live_analysis_latest.csv",
+  "out_json": "/Users/aadithyasumod/Documents/Playground/live_analysis_summary.json"
+}
