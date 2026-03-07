@@ -21,6 +21,8 @@
   "loop_minutes": 0,
   "bell_alert": true,
   "webhook_url": null,
+  "traffic_green_min": 0.65,
+  "traffic_yellow_min": 0.45,
 
   "out_csv": "/Users/aadithyasumod/Documents/Playground/live_analysis_latest.csv",
   "out_json": "/Users/aadithyasumod/Documents/Playground/live_analysis_summary.json"

@@ -45,6 +45,10 @@ class MonitorConfig:
     bell_alert: bool = True
     webhook_url: str | None = None
 
+    # Traffic light thresholds for strategy health score
+    traffic_green_min: float = 0.65
+    traffic_yellow_min: float = 0.45
+
     # Outputs
     out_csv: str | None = "/Users/aadithyasumod/Documents/Playground/live_analysis_latest.csv"
     out_json: str | None = "/Users/aadithyasumod/Documents/Playground/live_analysis_summary.json"
@@ -78,6 +82,14 @@ def _strategy_health(df: pd.DataFrame) -> float:
     conf = float(np.clip(df["confidence"].mean() / 3.0, 0.0, 1.0)) if "confidence" in df else 0.0
     score = 0.5 * avg_health + 0.3 * actionable_rate + 0.2 * conf
     return float(np.clip(score, 0.0, 1.0))
+
+
+def _traffic_light(score: float, cfg: MonitorConfig) -> str:
+    if score >= cfg.traffic_green_min:
+        return "GREEN"
+    if score >= cfg.traffic_yellow_min:
+        return "YELLOW"
+    return "RED"
 
 
 
@@ -120,6 +132,7 @@ def _run_once(cfg: MonitorConfig) -> tuple[pd.DataFrame, dict]:
         & (df["zscore"].abs() >= cfg.alert_zscore)
     ]
 
+    health_score = _strategy_health(df)
     summary = {
         "timestamp": pd.Timestamp.utcnow().isoformat(),
         "symbols_analyzed": int(prices.shape[1]),
@@ -127,7 +140,8 @@ def _run_once(cfg: MonitorConfig) -> tuple[pd.DataFrame, dict]:
         "cointegrated_pairs": int(len(df)),
         "actionable_pairs": int((df["status"] == "ACTIONABLE").sum()),
         "alert_pairs": int(len(actionable)),
-        "strategy_health_score": _strategy_health(df),
+        "strategy_health_score": health_score,
+        "strategy_traffic_light": _traffic_light(health_score, cfg),
     }
 
     if len(df) > 0:

@@ -60,9 +60,14 @@ python -m pairs_trading.simple_monitor --config /Users/aadithyasumod/Documents/P
 
 What you get:
 - Strategy health score (0 to 1)
+- Traffic-light status (`GREEN`, `YELLOW`, `RED`)
 - Top current pair opportunities
 - Alert ping when opportunity is significant
 - Optional webhook alert via `PAIRS_ALERT_WEBHOOK_URL` or `webhook_url` in config
+
+Traffic-light thresholds are configurable in:
+- `traffic_green_min`
+- `traffic_yellow_min`
 
 ## A) Baseline Run (Synthetic Daily Data)
 

@@ -1,0 +1,13 @@
+{
+  "timestamp": "2026-03-07T22:00:51.536120+00:00",
+  "symbols_analyzed": 10,
+  "candidate_pairs": 2,
+  "cointegrated_pairs": 1,
+  "actionable_pairs": 0,
+  "alert_pairs": 0,
+  "strategy_health_score": 0.20495561449228475,
+  "top_pair": "AXISBANK/ICICIBANK",
+  "top_status": "NEAR_MEAN",
+  "top_zscore": -0.3860402093131269,
+  "top_confidence": 0.14760500704262752
+}
