@@ -6,3 +6,4 @@ matplotlib>=3.8
 kiteconnect>=5.0.1
 python-dotenv>=1.0
 yfinance>=0.2.54
+openpyxl>=3.1

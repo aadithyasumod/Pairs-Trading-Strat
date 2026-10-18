@@ -2,21 +2,16 @@ from __future__ import annotations
 
 import argparse
 import time
-from itertools import combinations
 from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
-from statsmodels.tsa.stattools import coint
 
+from .backtest import build_daily_model
 from .config import StrategyConfig
 from .data import load_price_csv
-from .hedge_ratio import rolling_ols_hedge_ratio
-from .ou import estimate_half_life
-from .regime import health_score, rolling_corr, volatility_spike_ratio
-from .signals import build_spread, rolling_zscore
+from .pair_selection import correlation_candidates, filter_symbols, passes_screen, screen_pair
 
 Pair = Tuple[str, str]
 
@@ -77,6 +72,8 @@ def _to_yahoo(symbol: str) -> str:
 
 
 def _download_prices(symbols: List[str], start: str, end: str | None, chunk_size: int, sleep_seconds: float) -> pd.DataFrame:
+    import yfinance as yf  # only needed when downloading, so CSV mode works offline
+
     yahoo_symbols = [_to_yahoo(s) for s in symbols]
     chunks = [yahoo_symbols[i : i + chunk_size] for i in range(0, len(yahoo_symbols), chunk_size)]
 
@@ -118,34 +115,12 @@ def _download_prices(symbols: List[str], start: str, end: str | None, chunk_size
 
 
 def _filter_symbols(prices: pd.DataFrame, min_history: int) -> pd.DataFrame:
-    keep = []
-    for c in prices.columns:
-        s = prices[c].dropna()
-        if len(s) >= min_history and (s > 0).all():
-            keep.append(c)
-    if len(keep) < 2:
-        raise RuntimeError("Not enough symbols after data-quality filter.")
-    return prices[keep].copy()
+    return filter_symbols(prices, min_history)
 
 
 
 def _build_candidates(prices: pd.DataFrame, min_corr: float, top_neighbors: int, max_candidates: int) -> List[Pair]:
-    rets = prices.pct_change().replace([np.inf, -np.inf], np.nan)
-    corr = rets.corr(min_periods=60)
-
-    pairs = set()
-    for s in corr.columns:
-        row = corr.loc[s].drop(labels=[s]).dropna()
-        row = row[row >= min_corr].sort_values(ascending=False).head(top_neighbors)
-        for t in row.index:
-            a, b = sorted((s, t))
-            pairs.add((a, b))
-            if len(pairs) >= max_candidates:
-                break
-        if len(pairs) >= max_candidates:
-            break
-
-    return sorted(pairs)
+    return correlation_candidates(prices, min_corr, top_neighbors, max_candidates)
 
 
 
@@ -170,70 +145,71 @@ def _status_from_signal(z: float, health: float, cfg: StrategyConfig, health_pau
 
 
 
-def _analyze_pair(prices: pd.DataFrame, a: str, b: str, cfg: StrategyConfig) -> dict:
+def _analyze_pair(prices: pd.DataFrame, a: str, b: str, cfg: StrategyConfig, require_screen: bool = False) -> dict:
+    """Current signal for one pair.
+
+    Cointegration, hedge beta and formation half-life are measured on the most recent
+    `cfg.formation_days` bars (the same window the walk-forward backtest selects on). With
+    `require_screen`, pairs that fail the screen return {} before the costlier signal model runs.
+    """
     pair_px = prices[[a, b]].dropna()
     if len(pair_px) < cfg.min_history:
         return {}
 
-    corr_val = pair_px[a].pct_change().corr(pair_px[b].pct_change())
-    if not np.isfinite(corr_val):
+    formation = pair_px.iloc[-cfg.formation_days :] if cfg.formation_days else pair_px
+    screen = screen_pair(formation[a], formation[b])
+    if screen is None:
+        return {}
+    if require_screen and not passes_screen(screen, cfg):
         return {}
 
-    log_a = np.log(pair_px[a])
-    log_b = np.log(pair_px[b])
+    model = build_daily_model(pair_px[a], pair_px[b], cfg)
+    spread_std = model["spread"].rolling(cfg.zscore_window).std(ddof=0)
+    last = model.iloc[-1]
 
-    try:
-        _, pval, _ = coint(log_a, log_b)
-    except Exception:
-        return {}
+    def finite(value: float) -> float:
+        return float(value) if np.isfinite(value) else np.nan
 
-    hr = rolling_ols_hedge_ratio(log_a, log_b, window=cfg.hedge_window)
-    spread = build_spread(log_a, log_b, hr["alpha"], hr["beta"])
-    z = rolling_zscore(spread, cfg.zscore_window)
-    hl = estimate_half_life(spread, cfg.ou_window)
+    last_z = finite(last["zscore"])
+    last_spread_std = finite(spread_std.iloc[-1])
+    health = float(last["health"])
+    pval = screen["eg_pvalue"]
 
-    rcorr = rolling_corr(pair_px[a], pair_px[b], cfg.hedge_window)
-    beta_jump = hr["beta"].diff().abs()
-    vspike = volatility_spike_ratio(spread, cfg.hedge_window)
+    status, suggested_action = _status_from_signal(last_z, health, cfg, health_pause_threshold=cfg.health_pause_threshold)
 
-    last = pair_px.index[-1]
-    last_z = float(z.loc[last]) if np.isfinite(z.loc[last]) else np.nan
-    last_hl = float(hl.loc[last]) if np.isfinite(hl.loc[last]) else np.nan
-    last_beta = float(hr["beta"].loc[last]) if np.isfinite(hr["beta"].loc[last]) else np.nan
-
-    health = health_score(
-        corr_value=float(rcorr.loc[last]) if np.isfinite(rcorr.loc[last]) else np.nan,
-        beta_jump=float(beta_jump.loc[last]) if np.isfinite(beta_jump.loc[last]) else np.nan,
-        vol_spike=float(vspike.loc[last]) if np.isfinite(vspike.loc[last]) else np.nan,
-        min_corr=0.45,
-        max_beta_jump=0.08,
-        max_vol_spike_ratio=2.0,
-    )
-
-    status, suggested_action = _status_from_signal(last_z, health, cfg, health_pause_threshold=0.4)
-
-    confidence = abs(last_z) * max(0.0, health) * max(0.0, 1.0 - pval)
+    confidence = abs(last_z) * max(0.0, health) * max(0.0, 1.0 - pval) if np.isfinite(last_z) else 0.0
+    # Approximate expected pair return if spread mean-reverts from current z toward z_exit.
+    expected_reversion_return = np.nan
+    if np.isfinite(last_z) and np.isfinite(last_spread_std):
+        z_gap = max(0.0, abs(last_z) - cfg.z_exit)
+        expected_reversion_return = z_gap * max(0.0, last_spread_std)
+        expected_reversion_return = float(np.clip(expected_reversion_return, 0.0, 0.25))
 
     return {
-        "date": last,
+        "date": pair_px.index[-1],
         "asset_a": a,
         "asset_b": b,
-        "corr": float(corr_val),
+        "corr": screen["corr"],
         "eg_pvalue": float(pval),
-        "beta": last_beta,
-        "half_life": last_hl,
+        "beta": finite(last["beta"]),
+        "half_life": finite(last["half_life"]),
+        "formation_half_life": screen["half_life"],
         "zscore": last_z,
-        "health": float(health),
+        "spread_std": last_spread_std,
+        "health": health,
         "status": status,
         "suggested_action": suggested_action,
         "confidence": float(confidence),
+        "expected_reversion_return": expected_reversion_return,
     }
 
 
 
 def main() -> None:
     args = parse_args()
-    cfg = StrategyConfig(min_history=args.min_history, min_correlation=args.min_corr)
+    cfg = StrategyConfig(
+        min_history=args.min_history, min_correlation=args.min_corr, coint_p_threshold=args.coint_p_threshold
+    )
 
     if args.csv:
         prices = load_price_csv(args.csv).prices
@@ -252,8 +228,8 @@ def main() -> None:
 
     rows = []
     for i, (a, b) in enumerate(candidates, 1):
-        row = _analyze_pair(prices, a, b, cfg)
-        if row and row["eg_pvalue"] <= args.coint_p_threshold:
+        row = _analyze_pair(prices, a, b, cfg, require_screen=True)
+        if row:
             rows.append(row)
 
         if i % 1000 == 0:
@@ -263,8 +239,6 @@ def main() -> None:
         raise RuntimeError("No cointegrated pairs found after analysis.")
 
     df = pd.DataFrame(rows)
-    df = df.sort_values(["status", "confidence", "health", "eg_pvalue"], ascending=[True, False, False, True])
-
     priority = {"ACTIONABLE": 0, "WATCHLIST": 1, "WATCH_REGIME_WEAK": 2, "NEAR_MEAN": 3, "NO_SIGNAL": 4, "EXTREME_RISK": 5}
     df["priority"] = df["status"].map(priority).fillna(99)
     df = df.sort_values(["priority", "confidence"], ascending=[True, False]).drop(columns=["priority"])

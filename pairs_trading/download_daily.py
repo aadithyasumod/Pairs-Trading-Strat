@@ -6,6 +6,8 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 DEFAULT_SYMBOLS = [
     "HDFCBANK",
@@ -40,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end", default=None, help="End date YYYY-MM-DD (default: today)")
     p.add_argument(
         "--out",
-        default="/Users/aadithyasumod/Documents/Playground/daily_prices.csv",
+        default=str(PROJECT_ROOT / "daily_prices.csv"),
         help="Output CSV path",
     )
     p.add_argument(

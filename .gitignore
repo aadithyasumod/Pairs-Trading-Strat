@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.pytest_cache/
+.DS_Store
+.env
+.env.*
+.claude/
+CLAUDE.md
+AGENTS.md
+
+# Downloaded prices and run outputs (regenerate with the scripts below)
+daily_prices_nse_universe*.csv
+nse_universe_pair_ranking.csv
+daily_pair_ranking.csv
+live_analysis_*
+results/
+cip_rajasthan_deck/

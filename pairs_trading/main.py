@@ -4,14 +4,10 @@ import argparse
 
 import numpy as np
 
-from .backtest import run_pair_backtest
+from .backtest import backtest_pair
 from .config import StrategyConfig
 from .data import generate_synthetic_prices, load_price_csv
-from .hedge_ratio import rolling_ols_hedge_ratio
-from .ou import estimate_half_life
 from .pair_selection import find_candidate_pairs
-from .signals import build_spread, raw_signal_from_z, rolling_zscore
-
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,6 +17,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--asset-b", type=str, default=None, help="Second asset symbol")
     p.add_argument("--plot", action="store_true", help="Plot equity curve")
     return p.parse_args()
+
+
+def _fmt(value: float, spec: str) -> str:
+    return format(value, spec) if np.isfinite(value) else "N/A"
 
 
 def main() -> None:
@@ -34,49 +34,44 @@ def main() -> None:
         a, b = args.asset_a, args.asset_b
         if a not in prices.columns or b not in prices.columns:
             raise ValueError(f"Assets must be in CSV columns. Available: {list(prices.columns)}")
-        chosen = (a, b, np.nan, np.nan, np.nan)
+        stats = {"corr": np.nan, "eg_pvalue": np.nan, "johansen_trace": np.nan, "half_life": np.nan}
     else:
         pairs = find_candidate_pairs(prices, cfg)
-        chosen = pairs[0] if pairs else (prices.columns[0], prices.columns[1], np.nan, np.nan, np.nan)
+        if pairs.empty:
+            raise RuntimeError(
+                "No pair passed the cointegration screen (EG p-value, positive beta, half-life bounds). "
+                "Pass --asset-a/--asset-b to backtest a specific pair anyway."
+            )
+        stats = pairs.iloc[0].to_dict()
+        a, b = stats["asset_a"], stats["asset_b"]
 
-    a, b, corr, eg_pval, joh_trace = chosen
     print(f"Selected pair: {a} / {b}")
-    print(f"Correlation (prefilter): {corr:.4f}" if np.isfinite(corr) else "Correlation: N/A")
-    print(f"Engle-Granger p-value: {eg_pval:.6f}" if np.isfinite(eg_pval) else "EG p-value: N/A")
-    print(f"Johansen trace stat: {joh_trace:.4f}" if np.isfinite(joh_trace) else "Johansen trace: N/A")
+    print(f"Correlation (log returns): {_fmt(stats['corr'], '.4f')}")
+    print(f"Engle-Granger p-value: {_fmt(stats['eg_pvalue'], '.6f')}")
+    print(f"Johansen trace stat: {_fmt(stats['johansen_trace'], '.4f')}")
+    print(f"Half-life (bars): {_fmt(stats['half_life'], '.2f')}")
+    if not args.asset_a:
+        print("Note: pair chosen and backtested on the same data (in-sample). Use walk_forward for out-of-sample.")
 
-    pair_px = prices[[a, b]].dropna().copy()
-    log_a = np.log(pair_px[a])
-    log_b = np.log(pair_px[b])
-
-    hr = rolling_ols_hedge_ratio(log_a, log_b, window=cfg.hedge_window)
-    spread = build_spread(log_a, log_b, hr["alpha"], hr["beta"])
-    z = rolling_zscore(spread, window=cfg.zscore_window)
-    hl = estimate_half_life(spread, window=cfg.ou_window)
-    sig = raw_signal_from_z(z, cfg)
-
-    ret_a = pair_px[a].pct_change().fillna(0.0)
-    ret_b = pair_px[b].pct_change().fillna(0.0)
-
-    res = run_pair_backtest(
-        returns_a=ret_a,
-        returns_b=ret_b,
-        zscore=z,
-        raw_signal=sig,
-        beta=hr["beta"].fillna(1.0),
-        half_life=hl,
-        cfg=cfg,
-    )
+    res = backtest_pair(prices[a], prices[b], cfg)
+    m = res.metrics
 
     print("\nBacktest summary")
-    print(f"Trades: {res.trades}")
-    print(f"Sharpe: {res.sharpe:.3f}")
-    print(f"Max drawdown (currency units): {res.max_drawdown:,.2f}")
+    print(f"Trades: {m['n_trades']}")
+    print(f"Win rate: {_fmt(m['win_rate'], '.1%')}")
+    print(f"Profit factor: {_fmt(m['profit_factor'], '.2f')}")
+    print(f"Avg holding (bars): {_fmt(m['avg_bars_held'], '.1f')}")
+    print(f"Sharpe: {m['sharpe']:.3f}")
+    print(f"Max drawdown (currency units): {m['max_drawdown']:,.2f}")
+    print(f"Total costs (currency units): {m['total_costs']:,.2f}")
     print(f"Final PnL (currency units): {res.equity_curve.iloc[-1]:,.2f}")
+    if res.n_trades:
+        print("Exits by reason: " + ", ".join(f"{k}={v}" for k, v in res.trades["exit_reason"].value_counts().items()))
 
     if args.plot:
         import matplotlib.pyplot as plt
 
+        z = res.model["zscore"]
         fig, ax = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
         ax[0].plot(res.equity_curve.index, res.equity_curve.values)
         ax[0].set_title("Equity Curve")

@@ -1,290 +1,102 @@
-# Intraday NIFTY Pairs Trading (Beginner-Friendly, Zerodha-Oriented)
+# Pairs Trading Lab
 
-This repo is a full starter framework for the strategy you asked for:
+A research framework for NSE equity pairs trading: it finds cointegrated pairs across the full NSE universe, trades their spread with one rule book shared by the backtester, the walk-forward test and a paper/live trader, and runs a monitor that flags today's deployable pairs.
 
-- Intraday pairs trading for equities
-- Cointegration-based pair discovery
-- Dynamic hedge ratio (rolling OLS)
-- OU half-life estimate
-- Regime-break detection (health score)
-- Risk controls + cooldown + stop
-- Backtest engine and a live-trader skeleton
-- Zerodha adapter (paper mode by default)
-- Simple live analysis monitor with alerts (no execution required)
-
-## Important Scope Notes
-
-1. This is **research + execution skeleton**, not production-ready capital deployment code.
-2. For live trading, use **paper mode first**, then small size, then scale.
-3. For equities shorting intraday, ensure your broker-side product/margin/shorting constraints are satisfied each day.
-
-## Project Structure
-
-- `pairs_trading/config.py`: Daily-mode defaults (kept for simple baseline).
-- `pairs_trading/intraday_config.py`: Intraday-specific parameters.
-- `pairs_trading/pair_selection.py`: Correlation + Engle-Granger + Johansen filters.
-- `pairs_trading/hedge_ratio.py`: Rolling OLS alpha/beta estimator.
-- `pairs_trading/signals.py`: Spread, z-score, entry/exit/stop rules.
-- `pairs_trading/ou.py`: Half-life estimation from spread dynamics.
-- `pairs_trading/regime.py`: Real-time relationship stability score.
-- `pairs_trading/position_sizing.py`: Pair quantity sizing.
-- `pairs_trading/intraday_engine.py`: Intraday backtest loop.
-- `pairs_trading/run_intraday.py`: Intraday backtest CLI.
-- `pairs_trading/zerodha_adapter.py`: Zerodha integration adapter.
-- `pairs_trading/live_trader.py`: Stateful live-trading logic scaffold.
-
-## Setup
-
-```bash
-cd /Users/aadithyasumod/Documents/Playground
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
 ```
-
-## Fastest Path: Live Analysis Monitor (No Execution)
-
-Use this if you only want analysis + alerts.
-
-1. Set your data source in:
-- `/Users/aadithyasumod/Documents/Playground/monitor_config.json`
-
-2. Run one analysis cycle:
-
-```bash
-python -m pairs_trading.simple_monitor --config /Users/aadithyasumod/Documents/Playground/monitor_config.json
-```
-
-3. Optional: run continuously every N minutes:
-- Set `"loop_minutes": 5` (or any number) in config.
-
-What you get:
-- Strategy health score (0 to 1)
-- Traffic-light status (`GREEN`, `YELLOW`, `RED`)
-- Top current pair opportunities
-- Alert ping when opportunity is significant
-- Optional webhook alert via `PAIRS_ALERT_WEBHOOK_URL` or `webhook_url` in config
-
-Traffic-light thresholds are configurable in:
-- `traffic_green_min`
-- `traffic_yellow_min`
-
-## A) Baseline Run (Synthetic Daily Data)
-
-```bash
-python -m pairs_trading.main
-```
-
-Useful for quickly understanding the logic chain before intraday.
-
-## B) Intraday Backtest Run (Your Real Data)
-
-Prepare one CSV with this schema:
-
-```csv
-timestamp,HDFCBANK,ICICIBANK
-2026-01-02 09:15:00,1721.5,1298.2
-2026-01-02 09:20:00,1722.1,1298.0
-2026-01-02 09:25:00,1721.9,1298.7
-```
-
-Run:
-
-```bash
-python -m pairs_trading.run_intraday \
-  --csv /absolute/path/intraday_pair.csv \
-  --asset-a HDFCBANK \
-  --asset-b ICICIBANK \
-  --plot
-```
-
-This prints:
-- Total trades
-- Final PnL
-- Approx annualized intraday Sharpe
-- Max drawdown
-- Average regime health
-
-## C) Pair Discovery on Multi-Symbol Data
-
-If you have wide daily data (`Date, HDFCBANK, ICICIBANK, ...`), run:
-
-```bash
-python -m pairs_trading.main --csv /absolute/path/daily_prices.csv
-```
-
-It auto-picks the strongest pair under current filters.
-
-If you do not have a daily CSV yet, download one directly:
-
-```bash
-python -m pairs_trading.download_daily \
-  --symbols HDFCBANK ICICIBANK AXISBANK SBIN KOTAKBANK \
-  --start 2020-01-01 \
-  --out /Users/aadithyasumod/Documents/Playground/daily_prices.csv
-```
-
-Then run:
-
-```bash
-python -m pairs_trading.batch_daily \
-  --csv /Users/aadithyasumod/Documents/Playground/daily_prices.csv \
-  --top 20 \
-  --out /Users/aadithyasumod/Documents/Playground/daily_pair_ranking.csv
-```
-
-## C2) Batch Ranking: Test Many Pairs Automatically
-
-### Daily wide CSV
-
-Evaluate prefiltered candidates:
-
-```bash
-python -m pairs_trading.batch_daily \
-  --csv /absolute/path/daily_prices.csv \
-  --top 20 \
-  --out /absolute/path/daily_pair_ranking.csv
-```
-
-Evaluate every possible pair (slower):
-
-```bash
-python -m pairs_trading.batch_daily \
-  --csv /absolute/path/daily_prices.csv \
-  --all-combinations \
-  --top 30 \
-  --out /absolute/path/daily_all_pairs.csv
-```
-
-### Intraday wide CSV
-
-CSV format must be:
-`timestamp,SYM1,SYM2,SYM3,...`
-
-Run:
-
-```bash
-python -m pairs_trading.batch_intraday \
-  --csv /absolute/path/intraday_prices.csv \
-  --min-bars 500 \
-  --top 20 \
-  --out /absolute/path/intraday_pair_ranking.csv
-```
-
-This prints top pairs and writes a full ranking with:
-- Sharpe
-- Final PnL
-- Max drawdown
-- Trades
-- Average health score
-
-## C3) Full NSE Universe (2500+ Symbols) Workflow
-
-Do not brute-force all pair combinations directly.
-For 2500 symbols, total pairs are about 3.1 million.
-
-Use the scalable pipeline below.
-
-### Step 1: Get NSE symbol master file
-
-Create a symbols file (`CSV` or `TXT`) with one symbol per row.
-Example CSV:
-
-```csv
-Symbol
-HDFCBANK
-ICICIBANK
-SBIN
+$ make run-walkforward
+Data: synthetic universe (P* pairs are cointegrated, D* are decoys, S* are singles) | 14 symbols
+Window 1: trade 2022-01-05 -> 2022-06-29 | 2 pairs | 7 trades | PnL 73,410
 ...
+Out-of-sample portfolio (what you would have earned)
+  sharpe                   2.0844
+  max_drawdown_pct         -0.0117
+  n_trades                 86
+  win_rate                 0.7209
+  walk_forward_efficiency  1.1034
+```
+*(synthetic data with planted pairs, used to check the method finds them; not a real-market result)*
+
+## What it does
+
+- **Selects pairs** whose log prices are cointegrated (Engle-Granger p ≤ 0.05, Johansen check), with a positive hedge ratio and a half-life between 1 and 60 bars. Correlation is only a speed prefilter.
+- **Models the spread** causally: rolling OLS `log(A) = α + β·log(B)` fitted on bars up to *t*−1, then a rolling z-score.
+- **Trades one rule book** (`PairStateMachine`): enter when `z_entry ≤ |z| < z_stop`, exit on mean reversion, stop when the spread keeps widening or after 2 × half-life bars, then cool down. A regime-health score (rolling correlation, beta jumps, volatility spikes) gates new entries.
+- **Sizes legs** in whole shares with beta-weighted notional, fixed for the trade's life.
+- **Backtests honestly**: signals on bar *t* fill at bar *t*+1, costs per leg per side, and a **walk-forward** mode that selects pairs on a 252-day formation window and trades the next 126 days, so all reported PnL is out-of-sample. A bar-by-bar replay through the live trader reproduces the backtest's decisions (tested).
+- **Scales to the whole NSE universe** (2,500+ symbols, ~3.1M possible pairs) by filtering bad symbols, building correlation neighbours and running cointegration only on candidates.
+- **Monitors live**: health score, GREEN/YELLOW/RED status, data-age guard, top opportunities with A/B/C quality tiers, optional webhook alert and an Excel workbook per run.
+- **Intraday mode**: entries 09:30–15:00, everything squared off at 15:20.
+- **Zerodha adapter** in paper mode by default; live mode reads `KITE_API_KEY` and `KITE_ACCESS_TOKEN` from the environment.
+
+## Architecture
+
+```
+fetch_nse_symbols / build_universe_from_zerodha  ->  symbol list
+download_daily / download_nse_universe           ->  wide daily price CSV (yfinance)
+pair_selection    correlation prefilter -> Engle-Granger + Johansen -> half-life screen
+hedge_ratio + signals (PairStateMachine) + regime + position_sizing
+  ├─ backtest / walk_forward / batch_daily / universe_scan   (daily research)
+  ├─ intraday_engine / run_intraday / batch_intraday          (intraday research)
+  ├─ simple_monitor  ->  console, webhook, results/run_NNNN.xlsx
+  └─ live_trader  ->  zerodha_adapter (paper by default)
 ```
 
-### Step 2: Download daily history in chunks
+## Requirements
+
+- Python 3.11+ (developed on 3.14)
+- Network access to Yahoo Finance and nseindia.com (Kite Connect credentials only for the Zerodha universe builder or live mode)
+
+## Run locally
 
 ```bash
-python -m pairs_trading.download_nse_universe \
-  --symbols-file /absolute/path/nse_symbols.csv \
-  --symbol-column Symbol \
-  --start 2020-01-01 \
-  --chunk-size 100 \
-  --sleep-seconds 0.6 \
-  --out /Users/aadithyasumod/Documents/Playground/daily_prices_nse_universe.csv
+make setup                 # create .venv and install requirements
+make test                  # full suite: models, rules, accounting, look-ahead, live/backtest parity
+make run-walkforward       # out-of-sample walk-forward on a synthetic universe with known answers
 ```
 
-### Step 3: Run scalable universe scan
+Real data:
 
 ```bash
-python -m pairs_trading.universe_scan \
-  --csv /Users/aadithyasumod/Documents/Playground/daily_prices_nse_universe.csv \
-  --min-history 252 \
-  --min-corr 0.65 \
-  --top-neighbors 20 \
-  --max-candidates 40000 \
-  --max-backtests 2000 \
-  --top 50 \
-  --out /Users/aadithyasumod/Documents/Playground/nse_universe_pair_ranking.csv
+.venv/bin/python -m pairs_trading.fetch_nse_symbols --out nse_symbols_full.csv
+.venv/bin/python -m pairs_trading.download_nse_universe --symbols-file nse_symbols_full.csv \
+    --symbol-column Symbol --start 2020-01-01 --out daily_prices_nse_universe.csv
+.venv/bin/python -m pairs_trading.universe_scan --csv daily_prices_nse_universe.csv --top 50 \
+    --out nse_universe_pair_ranking.csv
 ```
 
-This flow:
-1. Filters bad/incomplete symbols.
-2. Builds correlation-neighbor candidates.
-3. Runs cointegration only on filtered pairs.
-4. Backtests only best cointegrated candidates.
+Point `"csv"` in `monitor_config.json` at your downloaded price file, then:
 
-This is the practical way to handle full-universe scanning.
+| Command | What it does |
+|---|---|
+| `make run-analysis` | one monitor cycle (set `loop_minutes` to repeat) |
+| `make run-baseline` | baseline run on synthetic daily data |
+| `.venv/bin/python -m pairs_trading.walk_forward --csv daily_prices.csv --top-pairs 5` | walk-forward on real prices |
+| `.venv/bin/python -m pairs_trading.run_intraday --csv intraday.csv --asset-a HDFCBANK --asset-b ICICIBANK --plot` | intraday backtest on a `timestamp,SYM1,SYM2` CSV |
+| `.venv/bin/python scripts/export_walk_forward.py --csv daily_prices.csv` | walk-forward results as an Excel workbook |
 
-## D) Zerodha Integration (Paper/Live)
+### Optional environment variables
 
-### 1) Paper mode first
+| Variable | Used for |
+|---|---|
+| `KITE_API_KEY`, `KITE_ACCESS_TOKEN` | Zerodha symbol master and live mode |
+| `PAIRS_ALERT_WEBHOOK_URL` | monitor alerts |
 
-`ZerodhaAdapter(paper=True)` is default in `live_trader.py`.
-It prints intended orders without sending them.
+## Project structure
 
-### 2) Live mode env vars
-
-```bash
-export KITE_API_KEY="your_key"
-export KITE_ACCESS_TOKEN="your_access_token"
+```
+pairs_trading/       selection, hedge ratio, signals, regime, sizing, backtests, monitor, live trader
+scripts/             export_walk_forward.py
+tests/               unittest suite (also runs under pytest)
+monitor_config.json  monitor thresholds and data source
+daily_prices.csv     small sample of bank-stock daily closes
+nse_symbols*.csv     NSE symbol lists (fallback and full)
+Makefile, requirements.txt
 ```
 
-Then instantiate adapter as `ZerodhaAdapter(paper=False)`.
+Downloaded universe prices, rankings, monitor output and `results/` are generated locally and not tracked.
 
-## How the Intraday Model Works
+## Caveats
 
-1. Build rolling hedge ratio: `log(A) = alpha + beta * log(B)`.
-2. Spread = `log(A) - alpha - beta*log(B)`.
-3. Compute rolling z-score of spread.
-4. Enter when spread is extreme (`|z| >= z_entry`).
-5. Exit on mean reversion (`|z| <= z_exit`).
-6. Stop on extreme (`|z| >= z_stop`) or regime deterioration.
-7. Regime health uses:
-- rolling return correlation
-- beta jump instability
-- spread volatility spike
-8. Size both legs with beta-adjusted notional.
-
-## Beginner Operating Plan (Recommended)
-
-1. Run intraday backtest for one pair first.
-2. Tune only 3 parameters initially:
-- `z_entry`
-- `z_exit`
-- `hedge_window_bars`
-3. Validate after costs.
-4. Add 2–3 more pairs only after one pair is stable.
-5. Run paper mode for at least 2 weeks.
-6. Go live at minimum size.
-
-## Practical Production Upgrades (Next)
-
-1. Replace rolling OLS with Kalman filter beta.
-2. Add true Johansen rolling test in live gate.
-3. Replace placeholder flatten logic with actual position-sync from broker.
-4. Add exchange calendar, no-trade windows, and order retry logic.
-5. Add comprehensive trade journal and PnL attribution.
-
-## Risk Notes
-
-- Intraday correlation can break quickly around macro events.
-- Equity short availability and costs can vary intraday.
-- Backtest slippage is usually optimistic.
-- Never rely on a single pair.
+- Research and execution skeleton, not production capital-deployment code; use paper mode first. Not investment advice.
+- India allows cash-equity shorts only intraday (MIS), so a multi-day pair needs stock futures or SLB for the short leg; lot sizes are not modelled.
+- Universe CSVs are built from today's symbol list, so delisted names are missing (survivorship bias) and forward-filled gaps can look like flat prices.

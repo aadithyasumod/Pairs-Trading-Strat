@@ -1,5 +1,5 @@
 {
-  "csv": "/Users/aadithyasumod/Documents/Playground/daily_prices_nse_universe.csv",
+  "csv": "daily_prices_nse_universe_20260920.csv",
   "symbols_file": null,
   "symbol_column": "Symbol",
   "start": "2020-01-01",
@@ -8,15 +8,23 @@
   "sleep_seconds": 0.5,
 
   "min_history": 252,
-  "min_corr": 0.65,
+  "min_corr": 0.6,
   "top_neighbors": 20,
   "max_candidates": 40000,
   "coint_p_threshold": 0.05,
+  "formation_days": 252,
   "top_print": 15,
+  "max_data_age_days": 7,
 
-  "alert_zscore": 2.0,
-  "alert_confidence": 1.0,
-  "health_min_for_alert": 0.4,
+  "alert_zscore": 1.6,
+  "alert_confidence": 0.8,
+  "health_min_for_alert": 0.35,
+  "profitable_max_eg_pvalue": 0.05,
+  "profitable_min_health": 0.4,
+  "profitable_min_confidence": 0.9,
+  "profitable_min_abs_zscore": 1.6,
+  "capital_per_idea": 100000.0,
+  "deployable_top_n": 10,
 
   "loop_minutes": 0,
   "bell_alert": true,
@@ -24,6 +32,8 @@
   "traffic_green_min": 0.65,
   "traffic_yellow_min": 0.45,
 
-  "out_csv": "/Users/aadithyasumod/Documents/Playground/live_analysis_latest.csv",
-  "out_json": "/Users/aadithyasumod/Documents/Playground/live_analysis_summary.json"
+  "out_csv": "live_analysis_latest.csv",
+  "out_json": "live_analysis_summary.json",
+  "save_excel_per_run": true,
+  "results_dir": "results"
 }

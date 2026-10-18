@@ -33,7 +33,9 @@ def main() -> None:
     for i in range(len(px)):
         trader.on_new_history(px.iloc[: i + 1])
 
-    print("Replay finished. Check [PAPER ORDER] lines above for generated actions.")
+    print(f"Replay finished: {len(trader.decisions)} decisions, flat at end: {trader.is_flat()}")
+    for d in trader.decisions[-10:]:
+        print(f"  {d['timestamp']}  target={d['target']:+d}  {d['reason']}  z={d['zscore']:.2f}")
 
 
 if __name__ == "__main__":

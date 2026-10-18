@@ -3,13 +3,11 @@ from __future__ import annotations
 import argparse
 from itertools import combinations
 
-import numpy as np
 import pandas as pd
 
 from .data import load_intraday_wide_csv
 from .intraday_config import IntradayConfig
 from .intraday_engine import backtest_intraday_pair
-
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,35 +19,24 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _annualization_factor(bar_minutes: int) -> float:
-    bars_per_day = max(1, 375 // max(1, bar_minutes))
-    return float(np.sqrt(252 * bars_per_day))
-
-
 def _evaluate_pair(px: pd.DataFrame, a: str, b: str, cfg: IntradayConfig, min_bars: int) -> dict:
     pair_px = px[[a, b]].dropna()
     if len(pair_px) < min_bars:
         return {}
 
     res = backtest_intraday_pair(pair_px[a], pair_px[b], cfg)
-
-    ret = res.pnl / max(cfg.capital, 1.0)
-    vol = ret.std(ddof=0)
-    ann = _annualization_factor(cfg.bar_minutes)
-    sharpe = float((ret.mean() / vol) * ann) if vol > 1e-12 else 0.0
-
-    running_max = res.equity_curve.cummax()
-    drawdown = res.equity_curve - running_max
-
+    m = res.metrics
     return {
         "asset_a": a,
         "asset_b": b,
         "bars": len(pair_px),
-        "trades": int(res.trades),
-        "sharpe": float(sharpe),
-        "max_drawdown": float(drawdown.min()),
-        "final_pnl": float(res.equity_curve.iloc[-1]),
-        "avg_health": float(res.health.mean()),
+        "trades": m["n_trades"],
+        "win_rate": m["win_rate"],
+        "sharpe": m["sharpe"],
+        "max_drawdown": m["max_drawdown"],
+        "total_costs": m["total_costs"],
+        "final_pnl": m["total_pnl"],
+        "avg_health": float(res.model["health"].mean()),
     }
 
 

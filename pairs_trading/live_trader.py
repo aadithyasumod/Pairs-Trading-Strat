@@ -1,28 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
 import pandas as pd
 
-from .hedge_ratio import rolling_ols_hedge_ratio
 from .intraday_config import IntradayConfig
+from .intraday_engine import build_intraday_model, intraday_gates, intraday_rules, pair_capital
 from .position_sizing import compute_pair_order_size
-from .regime import health_score, rolling_corr, volatility_spike_ratio
-from .signals import build_spread, raw_signal_from_z, rolling_zscore
+from .signals import FLAT, LONG_SPREAD, PairStateMachine
 from .zerodha_adapter import OrderIntent, ZerodhaAdapter
-
-
-@dataclass
-class TraderState:
-    position: int = 0  # +1 long spread, -1 short spread, 0 flat
-    cooldown_left: int = 0
 
 
 class IntradayPairsTrader:
     """
     Stateful live trader logic for a single pair.
+
+    It drives the same PairStateMachine as the intraday backtest, so a bar-by-bar replay makes the
+    same entry/exit decisions. It tracks the signed share quantities it opened and flattens exactly
+    those on exit.
 
     You provide the latest history DataFrame each call:
       index: timestamp
@@ -40,91 +35,78 @@ class IntradayPairsTrader:
         self.asset_b = asset_b
         self.cfg = cfg or IntradayConfig()
         self.adapter = adapter or ZerodhaAdapter(paper=True)
-        self.state = TraderState()
+        self.machine = PairStateMachine(
+            intraday_rules(self.cfg), max_hold_cap=self.cfg.max_holding_bars_cap, default_hold=30
+        )
+        self.qty_a = 0  # signed shares currently held
+        self.qty_b = 0
+        self.last_bar: pd.Timestamp | None = None
+        self.decisions: list[dict] = []
 
-    def on_new_history(self, history: pd.DataFrame) -> None:
-        if len(history) < max(self.cfg.hedge_window_bars, self.cfg.zscore_window_bars) + 5:
-            return
+    @property
+    def position(self) -> int:
+        return self.machine.direction
 
-        px = history[[self.asset_a, self.asset_b]].dropna().copy()
-        log_a = np.log(px[self.asset_a])
-        log_b = np.log(px[self.asset_b])
+    def lookback_bars(self) -> int:
+        """Bars needed for every rolling statistic at the latest bar to be fully warmed up."""
+        cfg = self.cfg
+        return 2 * cfg.hedge_window_bars + max(cfg.zscore_window_bars, cfg.ou_window_bars) + 5
 
-        hr = rolling_ols_hedge_ratio(log_a, log_b, window=self.cfg.hedge_window_bars)
-        spread = build_spread(log_a, log_b, hr["alpha"], hr["beta"])
-        z = rolling_zscore(spread, self.cfg.zscore_window_bars)
-        sig = raw_signal_from_z(
-            z,
-            type("TmpCfg", (), {"z_entry": self.cfg.z_entry, "z_exit": self.cfg.z_exit, "z_stop": self.cfg.z_stop}),
+    def on_new_history(self, history: pd.DataFrame) -> tuple[int, str] | None:
+        """Process the newest bar in `history` once. Returns (target_position, reason)."""
+        px = history[[self.asset_a, self.asset_b]].dropna()
+        if px.empty:
+            return None
+        ts = px.index[-1]
+        if self.last_bar is not None and ts <= self.last_bar:
+            return None
+        self.last_bar = ts
+
+        px = px.iloc[-self.lookback_bars() :]
+        model = build_intraday_model(px[self.asset_a], px[self.asset_b], self.cfg)
+        can_enter, regime_ok, force_exit = intraday_gates(px.index, model["health"], self.cfg, detect_session_end=False)
+        last = model.iloc[-1]
+
+        target, reason = self.machine.on_bar(
+            float(last["zscore"]),
+            float(last["half_life"]),
+            float(last["beta"]),
+            can_enter=bool(can_enter.iloc[-1]),
+            regime_ok=bool(regime_ok.iloc[-1]),
+            force_reason=force_exit.iloc[-1],
         )
 
-        corr = rolling_corr(px[self.asset_a], px[self.asset_b], self.cfg.hedge_window_bars)
-        vol_spike = volatility_spike_ratio(spread, self.cfg.hedge_window_bars)
-        beta_jump = hr["beta"].diff().abs()
+        if reason == "entry":
+            self._enter_pair(target, float(last["beta"]), float(px[self.asset_a].iloc[-1]), float(px[self.asset_b].iloc[-1]))
+        elif reason.startswith("exit"):
+            self._exit_pair()
 
-        last_ts = px.index[-1]
-        last_z = float(z.iloc[-1]) if np.isfinite(z.iloc[-1]) else np.nan
-        last_sig = int(sig.iloc[-1]) if np.isfinite(sig.iloc[-1]) else 0
-        last_beta = float(hr["beta"].iloc[-1]) if np.isfinite(hr["beta"].iloc[-1]) else 1.0
-
-        last_health = health_score(
-            corr_value=float(corr.iloc[-1]) if np.isfinite(corr.iloc[-1]) else np.nan,
-            beta_jump=float(beta_jump.iloc[-1]) if np.isfinite(beta_jump.iloc[-1]) else np.nan,
-            vol_spike=float(vol_spike.iloc[-1]) if np.isfinite(vol_spike.iloc[-1]) else np.nan,
-            min_corr=self.cfg.min_rolling_corr,
-            max_beta_jump=self.cfg.max_beta_jump,
-            max_vol_spike_ratio=self.cfg.max_vol_spike_ratio,
-        )
-
-        if self.state.cooldown_left > 0:
-            self.state.cooldown_left -= 1
-            return
-
-        if self.state.position != 0 and np.isfinite(last_z) and abs(last_z) >= self.cfg.z_stop:
-            self._exit_pair(last_ts)
-            self.state.cooldown_left = self.cfg.cooldown_bars_after_stop
-            return
-
-        if last_health < self.cfg.health_pause_threshold:
-            if self.state.position != 0:
-                self._exit_pair(last_ts)
-            return
-
-        if self.state.position == 0 and last_sig != 0:
-            self._enter_pair(last_sig, last_beta, float(px[self.asset_a].iloc[-1]), float(px[self.asset_b].iloc[-1]))
-            return
-
-        if self.state.position != 0 and last_sig == 0:
-            self._exit_pair(last_ts)
+        if reason not in ("hold", "flat"):
+            self.decisions.append({"timestamp": ts, "target": target, "reason": reason, "zscore": float(last["zscore"])})
+        return target, reason
 
     def _enter_pair(self, direction: int, beta: float, price_a: float, price_b: float) -> None:
-        pair_capital = min(self.cfg.max_capital_per_pair, self.cfg.capital * self.cfg.max_gross_leverage / 2.0)
-        size = compute_pair_order_size(price_a=price_a, price_b=price_b, beta=beta, pair_capital=pair_capital)
+        size = compute_pair_order_size(price_a=price_a, price_b=price_b, beta=beta, pair_capital=pair_capital(self.cfg))
+        if size.qty_a == 0 or size.qty_b == 0:
+            return  # capital too small for one share of a leg
 
-        if direction == 1:
-            # Long spread: buy A, sell B
-            orders = [
-                OrderIntent(symbol=self.asset_a, side="BUY", quantity=size.qty_a),
-                OrderIntent(symbol=self.asset_b, side="SELL", quantity=size.qty_b),
-            ]
-        else:
-            # Short spread: sell A, buy B
-            orders = [
-                OrderIntent(symbol=self.asset_a, side="SELL", quantity=size.qty_a),
-                OrderIntent(symbol=self.asset_b, side="BUY", quantity=size.qty_b),
-            ]
+        # Long spread: buy A, sell B. Short spread: sell A, buy B.
+        side_a, side_b = ("BUY", "SELL") if direction == LONG_SPREAD else ("SELL", "BUY")
+        self.adapter.place_order(OrderIntent(symbol=self.asset_a, side=side_a, quantity=size.qty_a))
+        self.adapter.place_order(OrderIntent(symbol=self.asset_b, side=side_b, quantity=size.qty_b))
+        self.qty_a = direction * size.qty_a
+        self.qty_b = -direction * size.qty_b
 
-        for o in orders:
-            self.adapter.place_order(o)
-        self.state.position = direction
+    def _exit_pair(self) -> None:
+        # Flatten the quantities this trader opened. A production engine should also reconcile
+        # these against broker positions (partial fills, rejections, manual interventions).
+        for symbol, qty in ((self.asset_a, self.qty_a), (self.asset_b, self.qty_b)):
+            if qty > 0:
+                self.adapter.place_order(OrderIntent(symbol=symbol, side="SELL", quantity=qty))
+            elif qty < 0:
+                self.adapter.place_order(OrderIntent(symbol=symbol, side="BUY", quantity=-qty))
+        self.qty_a = 0
+        self.qty_b = 0
 
-    def _exit_pair(self, _ts: pd.Timestamp) -> None:
-        # In a production engine, you should fetch actual open quantities from broker positions.
-        # Here we place placeholder 1-share flattening orders as control-flow example.
-        if self.state.position == 1:
-            self.adapter.place_order(OrderIntent(symbol=self.asset_a, side="SELL", quantity=1))
-            self.adapter.place_order(OrderIntent(symbol=self.asset_b, side="BUY", quantity=1))
-        elif self.state.position == -1:
-            self.adapter.place_order(OrderIntent(symbol=self.asset_a, side="BUY", quantity=1))
-            self.adapter.place_order(OrderIntent(symbol=self.asset_b, side="SELL", quantity=1))
-        self.state.position = 0
+    def is_flat(self) -> bool:
+        return self.machine.direction == FLAT and self.qty_a == 0 and self.qty_b == 0

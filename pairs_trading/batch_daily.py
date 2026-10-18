@@ -3,21 +3,16 @@ from __future__ import annotations
 import argparse
 from itertools import combinations
 
-import numpy as np
 import pandas as pd
 
-from .backtest import run_pair_backtest
+from .backtest import backtest_pair
 from .config import StrategyConfig
 from .data import load_price_csv
-from .hedge_ratio import rolling_ols_hedge_ratio
-from .ou import estimate_half_life
 from .pair_selection import find_candidate_pairs
-from .signals import build_spread, raw_signal_from_z, rolling_zscore
-
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Batch evaluate daily pairs from wide CSV")
+    p = argparse.ArgumentParser(description="Batch evaluate daily pairs from wide CSV (in-sample ranking)")
     p.add_argument("--csv", required=True, help="Daily CSV with Date + many symbols")
     p.add_argument("--top", type=int, default=20, help="Show top N pairs")
     p.add_argument("--out", type=str, default=None, help="Optional output CSV path")
@@ -26,40 +21,22 @@ def parse_args() -> argparse.Namespace:
 
 
 def _evaluate_pair(prices: pd.DataFrame, a: str, b: str, cfg: StrategyConfig) -> dict:
-    pair_px = prices[[a, b]].dropna().copy()
+    pair_px = prices[[a, b]].dropna()
     if len(pair_px) < cfg.min_history:
         return {}
-
-    log_a = np.log(pair_px[a])
-    log_b = np.log(pair_px[b])
-
-    hr = rolling_ols_hedge_ratio(log_a, log_b, window=cfg.hedge_window)
-    spread = build_spread(log_a, log_b, hr["alpha"], hr["beta"])
-    z = rolling_zscore(spread, window=cfg.zscore_window)
-    hl = estimate_half_life(spread, window=cfg.ou_window)
-    sig = raw_signal_from_z(z, cfg)
-
-    ret_a = pair_px[a].pct_change().fillna(0.0)
-    ret_b = pair_px[b].pct_change().fillna(0.0)
-
-    res = run_pair_backtest(
-        returns_a=ret_a,
-        returns_b=ret_b,
-        zscore=z,
-        raw_signal=sig,
-        beta=hr["beta"].fillna(1.0),
-        half_life=hl,
-        cfg=cfg,
-    )
-
+    res = backtest_pair(pair_px[a], pair_px[b], cfg)
+    m = res.metrics
     return {
         "asset_a": a,
         "asset_b": b,
         "bars": len(pair_px),
-        "trades": int(res.trades),
-        "sharpe": float(res.sharpe),
-        "max_drawdown": float(res.max_drawdown),
-        "final_pnl": float(res.equity_curve.iloc[-1]),
+        "trades": m["n_trades"],
+        "win_rate": m["win_rate"],
+        "profit_factor": m["profit_factor"],
+        "sharpe": m["sharpe"],
+        "max_drawdown": m["max_drawdown"],
+        "total_costs": m["total_costs"],
+        "final_pnl": m["total_pnl"],
     }
 
 
@@ -68,18 +45,16 @@ def main() -> None:
     cfg = StrategyConfig()
     prices = load_price_csv(args.csv).prices
 
-    rows = []
-
     if args.all_combinations:
-        symbols = list(prices.columns)
-        pairs = list(combinations(symbols, 2))
+        pairs = list(combinations(prices.columns, 2))
     else:
         candidates = find_candidate_pairs(prices, cfg)
-        pairs = [(a, b) for a, b, _, _, _ in candidates]
+        pairs = list(zip(candidates["asset_a"], candidates["asset_b"]))
 
     if not pairs:
-        raise RuntimeError("No candidate pairs found.")
+        raise RuntimeError("No candidate pairs passed the cointegration screen. Try --all-combinations.")
 
+    rows = []
     for a, b in pairs:
         row = _evaluate_pair(prices, a, b, cfg)
         if row:
@@ -90,6 +65,7 @@ def main() -> None:
 
     df = pd.DataFrame(rows).sort_values(["sharpe", "final_pnl"], ascending=[False, False]).reset_index(drop=True)
 
+    print("In-sample ranking: pairs are screened and backtested on the same data. Validate with walk_forward.")
     print(df.head(args.top).to_string(index=False, float_format=lambda x: f"{x:,.4f}"))
 
     if args.out:

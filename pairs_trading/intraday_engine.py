@@ -1,147 +1,109 @@
+"""Intraday (MIS) pair backtest: same rule book as daily, plus session rules.
+
+- no new entries outside [no_new_entries_before, no_new_entries_after)
+- every position is squared off at square_off_time, or on the session's last bar if earlier
+- health below health_pause_threshold blocks entries; below the lower health_exit_threshold it
+  also exits open trades (two thresholds, so a score hovering near one level cannot whipsaw)
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+import datetime as dt
 
 import numpy as np
 import pandas as pd
 
-from .hedge_ratio import rolling_ols_hedge_ratio
+from .backtest import PairBacktestResult, simulate_pair
 from .intraday_config import IntradayConfig
-from .ou import estimate_half_life
-from .position_sizing import PairOrderSize, compute_pair_order_size
-from .regime import health_score, rolling_corr, volatility_spike_ratio
-from .signals import build_spread, raw_signal_from_z, rolling_zscore
+from .regime import pair_health
+from .signals import SignalRules, spread_model
+
+SQUARE_OFF_REASON = "exit_square_off"
 
 
-@dataclass
-class IntradayBacktestResult:
-    equity_curve: pd.Series
-    pnl: pd.Series
-    position: pd.Series
-    health: pd.Series
-    zscore: pd.Series
-    trades: int
+def _clock(value: str) -> dt.time:
+    return dt.datetime.strptime(value, "%H:%M").time()
 
 
-
-def _max_holding_bars(hl_bars: float, cap: int) -> int:
-    if not np.isfinite(hl_bars) or hl_bars <= 0:
-        return min(30, cap)
-    return min(int(np.ceil(2.0 * hl_bars)), cap)
+def intraday_rules(cfg: IntradayConfig) -> SignalRules:
+    return SignalRules(cfg.z_entry, cfg.z_exit, cfg.z_stop, cfg.cooldown_bars_after_stop)
 
 
-def _trade_cost_fraction(cfg: IntradayConfig) -> float:
-    # 2 legs in a pair
-    return 2.0 * (cfg.fee_bps_per_leg + cfg.slippage_bps_per_leg) / 10_000.0
+def bars_per_session(cfg: IntradayConfig) -> int:
+    return max(1, 375 // max(1, cfg.bar_minutes))
+
+
+def intraday_periods_per_year(cfg: IntradayConfig) -> float:
+    return 252.0 * bars_per_session(cfg)
+
+
+def pair_capital(cfg: IntradayConfig) -> float:
+    return min(cfg.max_capital_per_pair, cfg.capital * cfg.max_gross_leverage / 2.0)
+
+
+def build_intraday_model(prices_a: pd.Series, prices_b: pd.Series, cfg: IntradayConfig) -> pd.DataFrame:
+    model = spread_model(prices_a, prices_b, cfg.hedge_window_bars, cfg.zscore_window_bars, cfg.ou_window_bars)
+    model["health"] = pair_health(
+        prices_a,
+        prices_b,
+        model,
+        window=cfg.hedge_window_bars,
+        min_corr=cfg.min_rolling_corr,
+        max_beta_jump=cfg.max_beta_jump,
+        max_vol_spike_ratio=cfg.max_vol_spike_ratio,
+    )
+    return model
+
+
+def intraday_gates(
+    index: pd.DatetimeIndex,
+    health: pd.Series,
+    cfg: IntradayConfig,
+    detect_session_end: bool = True,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Per-bar (can_enter, regime_ok, force_exit) for the intraday session rules.
+
+    `detect_session_end` treats the last bar of each date as a square-off bar, which a backtest can
+    see but a live trader cannot (it relies on square_off_time instead).
+    """
+    times = pd.Series(index.time, index=index)
+    square_off = times >= _clock(cfg.square_off_time)
+    if detect_session_end:
+        dates = pd.Series(index.normalize(), index=index)
+        square_off |= dates != dates.shift(-1)
+
+    regime_ok = health >= cfg.health_exit_threshold
+    in_entry_window = (times >= _clock(cfg.no_new_entries_before)) & (times < _clock(cfg.no_new_entries_after))
+    can_enter = in_entry_window & (health >= cfg.health_pause_threshold) & ~square_off
+    force_exit = pd.Series(np.where(square_off, SQUARE_OFF_REASON, None), index=index, dtype=object)
+    return can_enter, regime_ok, force_exit
 
 
 def backtest_intraday_pair(
     prices_a: pd.Series,
     prices_b: pd.Series,
     cfg: IntradayConfig,
-) -> IntradayBacktestResult:
+) -> PairBacktestResult:
     px = pd.concat([prices_a.rename("a"), prices_b.rename("b")], axis=1).dropna()
-    log_a = np.log(px["a"])
-    log_b = np.log(px["b"])
+    if len(px) < cfg.hedge_window_bars + cfg.zscore_window_bars + 2:
+        raise ValueError("Not enough intraday bars to warm up the hedge and z-score windows.")
 
-    hr = rolling_ols_hedge_ratio(log_a, log_b, window=cfg.hedge_window_bars)
-    spread = build_spread(log_a, log_b, hr["alpha"], hr["beta"])
-    z = rolling_zscore(spread, cfg.zscore_window_bars)
-    raw_sig = raw_signal_from_z(
-        z,
-        type("TmpCfg", (), {"z_entry": cfg.z_entry, "z_exit": cfg.z_exit, "z_stop": cfg.z_stop}),
-    )
-    hl = estimate_half_life(spread, cfg.ou_window_bars)
+    model = build_intraday_model(px["a"], px["b"], cfg)
+    can_enter, regime_ok, force_exit = intraday_gates(px.index, model["health"], cfg)
 
-    corr = rolling_corr(px["a"], px["b"], cfg.hedge_window_bars)
-    beta_jump = hr["beta"].diff().abs()
-    vol_spike = volatility_spike_ratio(spread, cfg.hedge_window_bars)
-
-    health = pd.Series(index=px.index, dtype=float)
-    for i in px.index:
-        health.loc[i] = health_score(
-            corr_value=float(corr.loc[i]) if np.isfinite(corr.loc[i]) else np.nan,
-            beta_jump=float(beta_jump.loc[i]) if np.isfinite(beta_jump.loc[i]) else np.nan,
-            vol_spike=float(vol_spike.loc[i]) if np.isfinite(vol_spike.loc[i]) else np.nan,
-            min_corr=cfg.min_rolling_corr,
-            max_beta_jump=cfg.max_beta_jump,
-            max_vol_spike_ratio=cfg.max_vol_spike_ratio,
-        )
-
-    ret_a = px["a"].pct_change().fillna(0.0)
-    ret_b = px["b"].pct_change().fillna(0.0)
-
-    pos = pd.Series(0, index=px.index, dtype=int)
-    pnl = pd.Series(0.0, index=px.index, dtype=float)
-
-    current_pos = 0
-    bars_in_trade = 0
-    cooldown_left = 0
-    trades = 0
-
-    pair_capital = min(cfg.max_capital_per_pair, cfg.capital * cfg.max_gross_leverage / 2.0)
-    cost_frac = _trade_cost_fraction(cfg)
-
-    for t in range(1, len(px.index)):
-        i = px.index[t]
-
-        beta_now = float(hr["beta"].iloc[t]) if np.isfinite(hr["beta"].iloc[t]) else 1.0
-        hl_now = float(hl.iloc[t]) if np.isfinite(hl.iloc[t]) else np.nan
-        max_hold = _max_holding_bars(hl_now, cfg.max_holding_bars_cap)
-
-        if current_pos != 0:
-            bars_in_trade += 1
-
-        z_now = float(z.iloc[t]) if np.isfinite(z.iloc[t]) else np.nan
-        health_now = float(health.iloc[t]) if np.isfinite(health.iloc[t]) else 0.0
-
-        forced_exit = False
-        if current_pos != 0 and np.isfinite(z_now) and abs(z_now) >= cfg.z_stop:
-            forced_exit = True
-        if current_pos != 0 and bars_in_trade > max_hold:
-            forced_exit = True
-        if current_pos != 0 and health_now < cfg.health_pause_threshold:
-            forced_exit = True
-
-        if forced_exit:
-            current_pos = 0
-            bars_in_trade = 0
-            cooldown_left = cfg.cooldown_bars_after_stop
-
-        desired = int(raw_sig.iloc[t]) if np.isfinite(raw_sig.iloc[t]) else 0
-
-        if cooldown_left > 0:
-            desired = 0
-            cooldown_left -= 1
-
-        if health_now < cfg.health_pause_threshold:
-            desired = 0
-
-        if current_pos == 0 and desired != 0:
-            current_pos = desired
-            bars_in_trade = 1
-            trades += 1
-
-        pos.iloc[t] = current_pos
-
-        gross_ret = current_pos * (ret_a.iloc[t] - beta_now * ret_b.iloc[t])
-        changed = int(pos.iloc[t] != pos.iloc[t - 1])
-
-        size: PairOrderSize = compute_pair_order_size(
-            price_a=float(px["a"].iloc[t]),
-            price_b=float(px["b"].iloc[t]),
-            beta=beta_now,
-            pair_capital=pair_capital,
-        )
-
-        pnl.iloc[t] = size.gross_notional * gross_ret - changed * size.gross_notional * cost_frac
-
-    equity = pnl.cumsum()
-    return IntradayBacktestResult(
-        equity_curve=equity,
-        pnl=pnl,
-        position=pos,
-        health=health,
-        zscore=z,
-        trades=trades,
+    return simulate_pair(
+        px["a"],
+        px["b"],
+        model,
+        intraday_rules(cfg),
+        notional=pair_capital(cfg),
+        cost_bps_per_leg=cfg.fee_bps_per_leg + cfg.slippage_bps_per_leg,
+        max_hold_cap=cfg.max_holding_bars_cap,
+        default_hold=30,
+        execution_lag=cfg.execution_lag_bars,
+        can_enter=can_enter,
+        regime_ok=regime_ok,
+        force_exit=force_exit,
+        capital=cfg.capital,
+        periods_per_year=intraday_periods_per_year(cfg),
     )

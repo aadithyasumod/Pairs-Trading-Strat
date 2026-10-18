@@ -42,6 +42,10 @@ class ZerodhaAdapter:
             self.kite.set_access_token(access_token)
 
     def place_order(self, order: OrderIntent) -> str:
+        if order.side not in ("BUY", "SELL"):
+            raise ValueError(f"Order side must be BUY or SELL, got {order.side!r}.")
+        if order.quantity <= 0:
+            raise ValueError(f"Order quantity must be positive, got {order.quantity}.")
         if self.paper:
             print(
                 f"[PAPER ORDER] {order.side} {order.quantity} {order.symbol} "

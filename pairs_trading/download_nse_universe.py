@@ -8,6 +8,8 @@ from typing import List
 import pandas as pd
 import yfinance as yf
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 
 def _to_yahoo_symbol(symbol: str) -> str:
@@ -55,9 +57,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end", default=None)
     p.add_argument("--chunk-size", type=int, default=100, help="Symbols per yfinance request")
     p.add_argument("--sleep-seconds", type=float, default=0.6, help="Pause between chunks")
+    p.add_argument("--retries", type=int, default=2, help="Retries per chunk on failure")
+    p.add_argument("--max-symbols", type=int, default=0, help="Optional cap for testing; 0 means all")
     p.add_argument(
         "--out",
-        default="/Users/aadithyasumod/Documents/Playground/daily_prices_nse_universe.csv",
+        default=str(PROJECT_ROOT / "daily_prices_nse_universe.csv"),
         help="Output CSV path",
     )
     return p.parse_args()
@@ -94,6 +98,8 @@ def _extract_close(data: pd.DataFrame) -> pd.DataFrame:
 def main() -> None:
     args = parse_args()
     symbols = _read_symbols(args.symbols_file, args.symbol_column)
+    if args.max_symbols and args.max_symbols > 0:
+        symbols = symbols[: args.max_symbols]
     if len(symbols) < 2:
         raise RuntimeError("Need at least 2 symbols in symbols file.")
 
@@ -101,24 +107,30 @@ def main() -> None:
     chunks = [yahoo_symbols[i : i + args.chunk_size] for i in range(0, len(yahoo_symbols), args.chunk_size)]
 
     all_px = []
+    failed_chunks = 0
     for i, chunk in enumerate(chunks, 1):
         print(f"Downloading chunk {i}/{len(chunks)} with {len(chunk)} symbols...")
-        try:
-            data = yf.download(
-                chunk,
-                start=args.start,
-                end=args.end,
-                auto_adjust=True,
-                progress=False,
-                group_by="column",
-            )
-        except Exception as exc:
-            print(f"Chunk failed: {exc}")
+        data = pd.DataFrame()
+        for attempt in range(args.retries + 1):
+            try:
+                data = yf.download(
+                    chunk,
+                    start=args.start,
+                    end=args.end,
+                    auto_adjust=True,
+                    progress=False,
+                    group_by="column",
+                )
+                if not data.empty:
+                    break
+            except Exception as exc:
+                print(f"Chunk {i} attempt {attempt + 1} failed: {exc}")
             time.sleep(args.sleep_seconds)
-            continue
 
         px = _extract_close(data)
         if px.empty:
+            failed_chunks += 1
+            print(f"Chunk {i} returned no usable data.")
             time.sleep(args.sleep_seconds)
             continue
 
@@ -137,7 +149,10 @@ def main() -> None:
     rename_map = {c: str(c).replace(".NS", "") for c in merged.columns}
     merged = merged.rename(columns=rename_map)
 
-    merged = merged.dropna(how="all").ffill().dropna(how="any")
+    # Keep sparse panel for broad universes; downstream filters select symbols with enough history.
+    merged = merged.dropna(how="all").ffill()
+    # Drop symbols with no price history at all.
+    merged = merged.dropna(axis=1, how="all")
     merged.index = pd.to_datetime(merged.index)
     merged.index.name = "Date"
 
@@ -148,6 +163,8 @@ def main() -> None:
     print(f"Saved: {out}")
     print(f"Rows: {len(merged)}")
     print(f"Symbols retained: {merged.shape[1]}")
+    if failed_chunks:
+        print(f"Warning: {failed_chunks} chunks had no usable data.")
 
 
 if __name__ == "__main__":
