@@ -1,5 +1,7 @@
 # Pairs Trading Lab
 
+[![CI](https://github.com/aadithyasumod/Pairs-Trading-Strat/actions/workflows/ci.yml/badge.svg)](https://github.com/aadithyasumod/Pairs-Trading-Strat/actions/workflows/ci.yml) ![Python](https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white) ![statsmodels](https://img.shields.io/badge/statsmodels-cointegration-4B8BBE) ![Zerodha](https://img.shields.io/badge/Zerodha-Kite%20Connect-387ED1) ![License](https://img.shields.io/badge/license-all%20rights%20reserved-lightgrey)
+
 A research framework for NSE equity pairs trading: it finds cointegrated pairs across the full NSE universe, trades their spread with one rule book shared by the backtester, the walk-forward test and a paper/live trader, and runs a monitor that flags today's deployable pairs.
 
 ```
@@ -100,3 +102,9 @@ Downloaded universe prices, rankings, monitor output and `results/` are generate
 - Research and execution skeleton, not production capital-deployment code; use paper mode first. Not investment advice.
 - India allows cash-equity shorts only intraday (MIS), so a multi-day pair needs stock futures or SLB for the short leg; lot sizes are not modelled.
 - Universe CSVs are built from today's symbol list, so delisted names are missing (survivorship bias) and forward-filled gaps can look like flat prices.
+
+## License
+
+Copyright © 2026 aadithyasumod. All rights reserved.
+
+No license is granted. The code is published for reference: you may view it, but not use, copy, modify or distribute it without written permission.

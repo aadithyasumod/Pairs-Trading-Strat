@@ -17,3 +17,4 @@ daily_pair_ranking.csv
 live_analysis_*
 results/
 cip_rajasthan_deck/
+.ruff_cache/
